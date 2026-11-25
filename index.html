@@ -94,6 +94,12 @@
     background: rgba(255, 176, 212, 0.16);
     box-shadow: 0 0 18px rgba(255, 160, 205, 0.45);
   }
+  .cam.loading { animation: campulse 1.1s ease-in-out infinite; }
+  .cam.hand { color: #ffffff; }
+  @keyframes campulse {
+    0%, 100% { opacity: .35; }
+    50%      { opacity: .9; }
+  }
 </style>
 </head>
 <body>
@@ -405,8 +411,23 @@
     idle += dt;
     var targetSpin = dragging ? 0.12 : 0.27;
     spin += (targetSpin - spin) * Math.min(1, dt * 2.2);
-    yaw += (spin + (dragging ? 0 : yawVel)) * dt;
+    // 手势：手停在哪边，树就往哪边持续转（摇杆式），偏得越多转得越快
+    if (camPhase === 2) {
+      var camDead = Math.abs(camNX) > 0.055 ? Math.abs(camNX) - 0.055 : 0;
+      var camTarget = (camNX > 0 ? camDead : -camDead) * 3.4;
+      camYaw += (camTarget - camYaw) * Math.min(1, dt * 5.0);
+    } else {
+      camYaw = 0;
+    }
+    yaw += (spin + (dragging ? 0 : yawVel) - camYaw) * dt;
     pitch += (dragging ? 0 : pitchVel) * dt;
+    // 手抬高/放低 → 视角跟着上下
+    if (camPhase === 2 && camHand) {
+      var tp = -0.25 + camNY * 1.2;
+      if (tp < -1.05) tp = -1.05;
+      if (tp > 0.85) tp = 0.85;
+      pitch += (tp - pitch) * Math.min(1, dt * 4.0);
+    }
     var damp = Math.pow(0.94, dt * 60);
     yawVel *= damp;
     pitchVel *= damp;
@@ -540,8 +561,9 @@
   /* ================= 摄像头手势控制（可选、懒加载） ================= */
   var HANDS_PKG = "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/";
   var camBtn = null, camVideo = null, camHands = null, camStream = null;
-  var camOn = false, camBusy = false, camTimer = null;
-  var camLastX = null, camLastY = null, camMiss = 0;
+  var camOn = false, camBusy = false, camTimer = null, camToken = 0;
+  var camPhase = 0;                        // 0=关闭 1=准备中 2=已开启
+  var camHand = 0, camNX = 0, camNY = 0, camYaw = 0, camLastNX = null;
 
   function camSupported() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
@@ -560,6 +582,8 @@
   function camStop() {
     camOn = false;
     camBusy = false;
+    camPhase = 0;
+    camToken++;
     if (camTimer) { clearInterval(camTimer); camTimer = null; }
     if (camStream) {
       try { camStream.getTracks().forEach(function (t) { t.stop(); }); } catch (err) {}
@@ -568,31 +592,37 @@
     if (camVideo) {
       try { camVideo.pause(); camVideo.srcObject = null; } catch (err) {}
     }
-    camLastX = camLastY = null;
-    if (camBtn) camBtn.classList.remove("on");
+    camHand = 0; camNX = 0; camNY = 0; camYaw = 0; camLastNX = null;
+    if (camBtn) {
+      camBtn.classList.remove("on");
+      camBtn.classList.remove("hand");
+      camBtn.classList.remove("loading");
+    }
   }
 
   function onCamResults(results) {
     var lms = results.multiHandLandmarks;
     var lm = lms && lms.length ? lms[0] : null;
     if (!lm) {
-      camMiss++;
-      if (camMiss > 6) { camLastX = camLastY = null; }
+      camHand = 0;
+      camNX = 0;
+      camNY = 0;
+      camLastNX = null;
+      if (camBtn) camBtn.classList.remove("hand");
       return;
     }
-    camMiss = 0;
-    var palm = lm[9];                   // 中指根部 ≈ 掌心
-    var x = 1 - palm.x;                 // 摄像头画面是镜像的，翻回来才跟手
-    var y = palm.y;
-    if (camLastX === null) { camLastX = x; camLastY = y; return; }
-    var dx = x - camLastX, dy = y - camLastY;
-    camLastX = x; camLastY = y;
-    if (Math.abs(dx) < 0.012 && Math.abs(dy) < 0.012) return;   // 抖动死区
-    yaw -= dx * 9.0;                    // 手横移整个画面约转 9 弧度
-    pitch += dy * 5.0;
-    if (pitch < -1.05) pitch = -1.05;
-    if (pitch > 0.85) pitch = 0.85;
-    idle = 0;
+    camHand = 1;
+    var palm = lm[9];                        // 中指根部 ≈ 掌心
+    var nx = (1 - palm.x) - 0.5;             // 左右偏移（摄像头画面镜像翻回来）
+    var ny = palm.y - 0.5;                   // 上下偏移
+    camNX = nx;
+    camNY = ny;
+    if (camBtn) camBtn.classList.add("hand");
+    // 瞬时跟手：手一挥，树立刻跟着走
+    if (camLastNX === null) { camLastNX = nx; return; }
+    var dx = nx - camLastNX;
+    camLastNX = nx;
+    if (Math.abs(dx) > 0.0012) yaw -= dx * 5.0;
   }
 
   function camLoop() {
@@ -601,11 +631,17 @@
       if (!camOn || camBusy || !camHands) return;
       if (!camVideo || camVideo.readyState < 2) return;
       camBusy = true;
+      var settled = false;
+      var t = setTimeout(function () {          // 单次识别超时，避免永久卡住
+        if (!settled) { settled = true; camBusy = false; }
+      }, 6000);
+      function done() {
+        if (!settled) { settled = true; clearTimeout(t); camBusy = false; }
+      }
       try {
-        camHands.send({ image: camVideo }).then(function () { camBusy = false; },
-                                                 function () { camBusy = false; });
-      } catch (err) { camBusy = false; }
-    }, 95);                              // 约 10 帧/秒识别，给渲染让出性能
+        camHands.send({ image: camVideo }).then(done, done);
+      } catch (err) { done(); }
+    }, 110);                                    // 约 9 帧/秒识别，给渲染让出性能
   }
 
   function loadScript(src) {
@@ -620,23 +656,34 @@
   }
 
   function camStart() {
-    if (camOn) { camStop(); return; }
-    if (camBtn) camBtn.style.opacity = "0.75";
-    var guard = setTimeout(function () {          // 加载/授权卡住时兜底恢复，不留下暗淡的图标
-      if (!camOn) { camStop(); if (camBtn) camBtn.style.opacity = ""; }
-    }, 18000);
+    if (camPhase === 2) { camStop(); return; }     // 已开启 → 关闭
+    if (camPhase === 1) return;                    // 准备中 → 忽略重复点击
+    camPhase = 1;
+    var tk = ++camToken;
+    if (camBtn) camBtn.classList.add("loading");
+
+    var phaseTimer = setTimeout(function () {      // 25 秒内没跑起来就复原
+      if (tk === camToken && camPhase !== 2) camStop();
+    }, 25000);
+
+    function fail() {
+      if (tk === camToken) camStop();
+    }
+
     Promise.resolve()
       .then(function () {
+        if (tk !== camToken) throw 0;
         if (!window.Hands) return loadScript(HANDS_PKG + "hands.js");
       })
       .then(function () {
+        if (tk !== camToken) throw 0;
         if (!camHands) {
           camHands = new window.Hands({ locateFile: function (f) { return HANDS_PKG + f; } });
           camHands.setOptions({
             maxNumHands: 1,
             modelComplexity: 0,
-            minDetectionConfidence: 0.55,
-            minTrackingConfidence: 0.5
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.45
           });
           camHands.onResults(onCamResults);
         }
@@ -646,33 +693,42 @@
         });
       })
       .then(function (stream) {
+        if (tk !== camToken) { try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} throw 0; }
         camStream = stream;
-        clearTimeout(guard);
         if (!camVideo) {
           camVideo = document.createElement("video");
           camVideo.playsInline = true;
           camVideo.muted = true;
           camVideo.autoplay = true;
           camVideo.setAttribute("playsinline", "");
-          camVideo.style.cssText = "position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;";
+          // 放在视口内但几乎不可见：太靠外会被浏览器当成离屏视频而暂停解码
+          camVideo.style.cssText = "position:fixed;left:0;top:0;width:4px;height:3px;opacity:0.01;pointer-events:none;z-index:-1;";
           document.body.appendChild(camVideo);
         }
         camVideo.srcObject = stream;
         var p = camVideo.play();
         if (p && p.catch) p.catch(function () {});
+        // 预热：先送一帧空白图，把 5MB 模型下载下来并把推理初始化好
+        var warm = document.createElement("canvas");
+        warm.width = 64; warm.height = 48;
+        var wctx = warm.getContext("2d");
+        wctx.fillStyle = "#808080";
+        wctx.fillRect(0, 0, 64, 48);
+        return camHands.send({ image: warm });
+      })
+      .then(function () {
+        if (tk !== camToken) throw 0;
+        clearTimeout(phaseTimer);
         camOn = true;
-        camLastX = camLastY = null;
+        camPhase = 2;                              // 只有推理真的跑通了才点亮
+        camHand = 0; camNX = 0; camNY = 0; camYaw = 0; camLastNX = null;
         if (camBtn) {
+          camBtn.classList.remove("loading");
           camBtn.classList.add("on");
-          camBtn.style.opacity = "";
         }
         camLoop();
       })
-      .catch(function () {              // 拒绝授权 / 加载失败 → 静默退回触摸拖动
-        clearTimeout(guard);
-        camStop();
-        if (camBtn) camBtn.style.opacity = "";
-      });
+      .catch(function () { fail(); });              // 任何一步失败 → 静默退回触摸拖动
   }
 
   if (camSupported()) {
