@@ -37,7 +37,7 @@
     font-size: clamp(14px, min(2.8125vw, 5vh), 78px);
     line-height: 1.16;
     letter-spacing: 0.015em;
-    white-space: nowrap;
+    width: max-content;          /* 宽度只由英文那行决定，署名右对齐就贴在英文右端 */
     text-shadow: 0 0 10px rgba(255, 226, 240, 0.55),
                  0 0 28px rgba(255, 172, 208, 0.34),
                  0 0 60px rgba(198, 160, 255, 0.22);
@@ -47,20 +47,31 @@
     will-change: opacity, transform, filter;
     animation: breathe 7s ease-in-out 3s infinite;
   }
-  /* 结尾的破折号署名：稍小、稍淡，像落在句尾的签名 */
+  /* 英文那行：不换行 */
+  .line {
+    display: block;
+    white-space: nowrap;
+  }
+  /* 破折号署名：另起一行、右对齐，落在英文的右下角 */
   .sign {
-    font-size: 0.66em;
-    letter-spacing: 0.06em;
+    display: block;
+    text-align: right;
+    font-style: normal;
+    font-size: 0.72em;
+    letter-spacing: 0.055em;
     opacity: 0.86;
+    padding-top: 0.16em;
+    white-space: nowrap;
   }
   /* 竖屏手机：文字居中放在树顶上方，不和树重叠 */
   @media (max-aspect-ratio: 1/1) {
     .title {
       left: 0;
       right: 0;
-      top: 2%;
-      text-align: center;
-      font-size: min(6.1vw, 3.4vh);
+      margin: 0 auto;
+      top: 7.5%;
+      text-align: left;
+      font-size: min(6.8vw, 3.9vh);
       letter-spacing: 0.03em;
     }
   }
@@ -110,7 +121,7 @@
 </head>
 <body>
 <canvas id="scene"></canvas>
-<h1 class="title">December with You<span class="sign"> &mdash; Valyr</span></h1>
+<h1 class="title"><span class="line">December with You</span><em class="sign">&mdash;&mdash; Valyr</em></h1>
 
 <script>
 (function () {
