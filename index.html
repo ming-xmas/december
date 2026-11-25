@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <meta name="format-detection" content="telephone=no">
-<title>December with You</title>
+<title>Ming</title>
 <style>
   html, body {
     margin: 0; padding: 0;
@@ -47,6 +47,12 @@
     will-change: opacity, transform, filter;
     animation: breathe 7s ease-in-out 3s infinite;
   }
+  /* 结尾的破折号署名：稍小、稍淡，像落在句尾的签名 */
+  .sign {
+    font-size: 0.66em;
+    letter-spacing: 0.06em;
+    opacity: 0.86;
+  }
   /* 竖屏手机：文字居中放在树顶上方，不和树重叠 */
   @media (max-aspect-ratio: 1/1) {
     .title {
@@ -54,7 +60,7 @@
       right: 0;
       top: 2%;
       text-align: center;
-      font-size: min(7.2vw, 4vh);
+      font-size: min(6.1vw, 3.4vh);
       letter-spacing: 0.03em;
     }
   }
@@ -104,7 +110,7 @@
 </head>
 <body>
 <canvas id="scene"></canvas>
-<h1 class="title">December with You</h1>
+<h1 class="title">December with You<span class="sign"> &mdash; Valyr</span></h1>
 
 <script>
 (function () {
