@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="format-detection" content="telephone=no">
+<title>December with You</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  canvas {
+    position: fixed;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: #000;
+  }
+  /* 页面上唯一的文字 */
+  .title {
+    position: fixed;
+    left: 2.5%;
+    top: 32%;
+    margin: 0;
+    color: #ffffff;
+    font-family: "Monotype Corsiva", "Brush Script MT", "Segoe Script", "Dancing Script", cursive;
+    font-size: clamp(14px, min(2.8125vw, 5vh), 78px);
+    line-height: 1.16;
+    letter-spacing: 0.015em;
+    white-space: nowrap;
+    text-shadow: 0 0 10px rgba(255, 226, 240, 0.55),
+                 0 0 28px rgba(255, 172, 208, 0.34),
+                 0 0 60px rgba(198, 160, 255, 0.22);
+    opacity: 0;
+    transform: translateY(12px);
+    filter: blur(7px);
+    will-change: opacity, transform, filter;
+    animation: breathe 7s ease-in-out 3s infinite;
+  }
+  /* 竖屏手机：文字居中放在树顶上方，不和树重叠 */
+  @media (max-aspect-ratio: 1/1) {
+    .title {
+      left: 0;
+      right: 0;
+      top: 2%;
+      text-align: center;
+      font-size: min(7.2vw, 4vh);
+      letter-spacing: 0.03em;
+    }
+  }
+  @keyframes breathe {
+    0%, 100% { text-shadow: 0 0 10px rgba(255, 226, 240, 0.55),
+                            0 0 28px rgba(255, 172, 208, 0.34),
+                            0 0 60px rgba(198, 160, 255, 0.22); }
+    50%      { text-shadow: 0 0 14px rgba(255, 232, 244, 0.72),
+                            0 0 40px rgba(255, 168, 206, 0.46),
+                            0 0 80px rgba(198, 160, 255, 0.30); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .title { filter: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<h1 class="title">December with You</h1>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ================= 相机参数（与原作一致） ================= */
+  var CAM_DIST = 13.0;
+  var CAM_HEIGHT = 6.0;
+  var PITCH = -0.25;
+  var TREE_HEIGHT = 12.0;
+  var TAU = Math.PI * 2;
+  var cosP = Math.cos(PITCH), sinP = Math.sin(PITCH);
+
+  var TREE_POINTS = 38000;
+  var GROUND_POINTS = 3200;
+  var STAR_POINTS = 1100;
+  var HEART_POINTS = 900;
+
+  /* ================= 画布与像素缓冲（自适应屏幕） ================= */
+  var canvas = document.getElementById("scene");
+  var W = 0, H = 0, dpr = 1, ctx = null, frameImg = null, pixels = null, zbuf = null;
+  var FOCAL = 0, sizeScale = 1;
+
+  function setupCanvas() {
+    var cw = Math.max(240, window.innerWidth);
+    var ch = Math.max(240, window.innerHeight);
+    var deviceRatio = window.devicePixelRatio || 1;
+    dpr = Math.min(deviceRatio, 2);
+    // 限制渲染分辨率，保证手机上依然流畅
+    var s = Math.min(dpr, 1150 / ch);
+    W = Math.max(200, Math.round(cw * s));
+    H = Math.max(200, Math.round(ch * s));
+
+    canvas.width = W;
+    canvas.height = H;
+
+    ctx = canvas.getContext("2d", { alpha: false });
+    frameImg = ctx.createImageData(W, H);
+    pixels = new Uint32Array(frameImg.data.buffer);
+    zbuf = new Float32Array(W * H);
+
+    // 投影比例：横屏按高度（保持原作视角），竖屏按宽度（树完整不裁）
+    FOCAL = Math.min(H * 0.63, W * 0.88);
+    sizeScale = Math.max(0.7, FOCAL / (900 * 0.63));
+  }
+
+  function pack(r, g, b) {
+    r = r < 0 ? 0 : (r > 255 ? 255 : r | 0);
+    g = g < 0 ? 0 : (g > 255 ? 255 : g | 0);
+    b = b < 0 ? 0 : (b > 255 ? 255 : b | 0);
+    return ((255 << 24) | (b << 16) | (g << 8) | r) >>> 0;
+  }
+
+  var posArr = [];
+  var colArr = [];
+  function add(x, y, z, c) {
+    posArr.push(x, y, z);
+    colArr.push(c);
+  }
+
+  /* 高斯随机（复现 random.gauss） */
+  var gaussSpare = null;
+  function gauss(mu, sigma) {
+    if (gaussSpare !== null) {
+      var v = gaussSpare;
+      gaussSpare = null;
+      return mu + sigma * v;
+    }
+    var u = 0, v2 = 0;
+    while (u === 0) u = Math.random();
+    while (v2 === 0) v2 = Math.random();
+    var mag = Math.sqrt(-2 * Math.log(u));
+    gaussSpare = mag * Math.sin(TAU * v2);
+    return mu + sigma * (mag * Math.cos(TAU * v2));
+  }
+
+  /* ================= 圣诞树 ================= */
+  function genTree() {
+    var loops = 9;
+    var spiralN = Math.floor(TREE_POINTS * 0.7);
+    var i, u, h, y, baseR, wave, t, ang, r, x, z, mid, g, b;
+
+    // 70% 螺旋灯带
+    for (i = 0; i < spiralN; i++) {
+      u = Math.random();
+      h = Math.pow(u, 1.6);
+      y = TREE_HEIGHT * h + 0.2;
+
+      baseR = Math.pow(1 - h, 1.1) * 3.2;
+      wave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+      baseR *= 1.0 + 0.65 * wave;
+
+      t = u * loops * TAU;
+      ang = t + (Math.random() * 0.44 - 0.22);
+      r = baseR * (0.85 + Math.random() * 0.23);
+      x = Math.cos(ang) * r;
+      z = Math.sin(ang) * r;
+
+      mid = 1.0 - Math.abs(h - 0.55) * 1.5;
+      if (mid < 0.15) mid = 0.15;
+      g = 155 + Math.floor(90 * mid);
+      b = 185 + Math.floor(70 * mid);
+      g = Math.min(255, g + Math.floor(Math.random() * 36) - 15);
+      b = Math.min(255, b + Math.floor(Math.random() * 51) - 15);
+
+      if (Math.random() < 0.08) {
+        g = 255 - Math.floor(Math.random() * 36);
+        b = 230 + Math.floor(Math.random() * 26);
+      }
+      add(x, y, z, pack(255, g, b));
+    }
+
+    // 30% 随机填充
+    for (i = spiralN; i < TREE_POINTS; i++) {
+      h = Math.pow(Math.random(), 1.9);
+      y = TREE_HEIGHT * h + 0.2 + (Math.random() * 0.16 - 0.08);
+
+      baseR = Math.pow(1 - h, 1.1) * 4.3;
+      wave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+      baseR *= 1.0 + 0.65 * wave;
+
+      r = baseR * Math.sqrt(Math.random());
+      ang = Math.random() * TAU;
+      x = Math.cos(ang) * r + (Math.random() * 0.16 - 0.08);
+      z = Math.sin(ang) * r + (Math.random() * 0.16 - 0.08);
+
+      g = 165 + Math.floor(Math.random() * 61);
+      b = 190 + Math.floor(Math.random() * 61);
+      add(x, y, z, pack(255, g, b));
+    }
+  }
+
+  /* ================= 地面光环 ================= */
+  function genGround() {
+    var rings = [4.6, 6.0, 7.4, 8.8, 10.2, 11.4];
+    for (var i = 0; i < GROUND_POINTS; i++) {
+      var ring = rings[Math.floor(Math.random() * rings.length)];
+      var r = gauss(ring, 0.3);
+      var th = Math.random() * TAU;
+      var c = Math.random() < 0.15 ? 235 + Math.floor(Math.random() * 21)
+                                   : 190 + Math.floor(Math.random() * 46);
+      add(Math.cos(th) * r, -0.25, Math.sin(th) * r, pack(c, c, 255));
+    }
+  }
+
+  /* ================= 空中亮点 ================= */
+  function genStars() {
+    for (var i = 0; i < STAR_POINTS; i++) {
+      var x = Math.random() * 36 - 18;
+      var z = Math.random() * 36 - 18;
+      var y = 3 + Math.random() * 15;
+      var base = 215 + Math.floor(Math.random() * 41);
+      add(x, y, z, pack(base, base, 255));
+    }
+  }
+
+  /* ================= 树顶 3D 爱心 ================= */
+  function genHeart() {
+    var scale = 0.9;
+    var topY = TREE_HEIGHT + 0.05;
+    var n = 0;
+    while (n < HEART_POINTS) {
+      var x = Math.random() * 2.6 - 1.3;
+      var y = Math.random() * 2.8 - 1.4;
+      var f = Math.pow(x * x + y * y - 1.0, 3) - x * x * Math.pow(y, 3);
+      if (f <= 0.0) {
+        var wx = x * scale * 0.8;
+        var wy = topY + (y + 1.0) * scale * 0.5;
+        var wz = Math.random() * 0.36 - 0.18;
+        var dist = Math.sqrt(x * x + y * y);
+        var factor = 1.15 - 0.5 * dist;
+        if (factor < 0.35) factor = 0.35;
+        var g = Math.floor(130 * factor + 80);
+        var b = Math.floor(190 * factor + 70);
+        g = g < 120 ? 120 : (g > 255 ? 255 : g);
+        b = b < 120 ? 120 : (b > 255 ? 255 : b);
+        add(wx, wy, wz, pack(255, g, b));
+        n++;
+      }
+    }
+  }
+
+  genTree();
+  genGround();
+  genStars();
+  genHeart();
+
+  var COUNT = posArr.length / 3;
+  var P = new Float32Array(posArr);
+  var C = new Uint32Array(colArr);
+  posArr = null; colArr = null;
+
+  /* ================= 前景雪花 ================= */
+  var snowSprite = (function () {
+    var s = 128;
+    var c = document.createElement("canvas");
+    c.width = c.height = s;
+    var g = c.getContext("2d");
+    var grad = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0.00, "rgba(255,255,255,1)");
+    grad.addColorStop(0.16, "rgba(255,255,255,0.88)");
+    grad.addColorStop(0.38, "rgba(255,255,255,0.40)");
+    grad.addColorStop(0.68, "rgba(255,255,255,0.11)");
+    grad.addColorStop(1.00, "rgba(255,255,255,0)");
+    g.fillStyle = grad;
+    g.fillRect(0, 0, s, s);
+    return c;
+  })();
+
+  var FLAKE_N = 10;
+  var flakes = [];
+  function respawn(f) {
+    f.x = Math.random() * W;
+    f.y = Math.random() * (H * 0.08) - H * 0.09;
+    f.r = (10 + Math.random() * 6) * sizeScale;
+    f.v = (30 + Math.random() * 15) * sizeScale;
+    f.life = (H + 80 * sizeScale - f.y) / f.v;
+    f.maxLife = f.life;
+  }
+  function resetFlakes(spread) {
+    flakes.length = 0;
+    for (var i = 0; i < FLAKE_N; i++) {
+      var f = {};
+      respawn(f);
+      if (spread) {
+        f.y = Math.random() * H;
+        f.life = (H + 80 * sizeScale - f.y) / f.v;
+        f.maxLife = f.life;
+      }
+      flakes.push(f);
+    }
+  }
+
+  function updateSnow(dt) {
+    for (var i = 0; i < flakes.length; i++) {
+      var f = flakes[i];
+      f.y += f.v * dt;
+      f.life -= dt;
+      if (f.life <= 0 || f.y > H + 60) respawn(f);
+    }
+  }
+
+  function drawSnow() {
+    for (var i = 0; i < flakes.length; i++) {
+      var f = flakes[i];
+      var phase = f.life / f.maxLife;
+      var a = phase > 0.3 ? 1 : Math.max(0, phase / 0.3);
+      if (a <= 0) continue;
+      var d = f.r * 5.2;
+      ctx.globalAlpha = a;
+      ctx.drawImage(snowSprite, f.x - d / 2, f.y - d / 2, d, d);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ================= 初始化 / 自适应 ================= */
+  setupCanvas();
+  resetFlakes(true);
+
+  var resizeTimer = null;
+  function onResize() {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () {
+      setupCanvas();
+      resetFlakes(true);
+    }, 160);
+  }
+  window.addEventListener("resize", onResize, false);
+  window.addEventListener("orientationchange", onResize, false);
+
+  /* ================= 主循环 ================= */
+  var angle = 0;
+  var lastT = 0;
+  var startT = 0;
+  var titleEl = document.querySelector(".title");
+
+  function enterTitle(t) {
+    var e = (t - 0.5) / 2.0;
+    if (e < 0) e = 0;
+    else if (e > 1) e = 1;
+    e = 1 - Math.pow(1 - e, 3);
+    titleEl.style.opacity = e.toFixed(3);
+    titleEl.style.transform = "translateY(" + ((1 - e) * 12).toFixed(2) + "px)";
+    titleEl.style.filter = e > 0.995 ? "none" : "blur(" + ((1 - e) * 7).toFixed(2) + "px)";
+  }
+
+  function render(now) {
+    if (!lastT) { lastT = now; startT = now; }
+    var dt = (now - lastT) / 1000;
+    lastT = now;
+    if (dt > 0.05) dt = 0.05;
+    if (dt < 0) dt = 0;
+    angle += 0.27 * dt;               // 原速：0.0045 / 帧 @60fps
+
+    enterTitle((now - startT) / 1000);
+    updateSnow(dt);
+
+    pixels.fill(0xff000000);
+    zbuf.fill(1e9);
+
+    var cosA = Math.cos(angle), sinA = Math.sin(angle);
+    var halfW = W * 0.5, halfH = H * 0.5;
+
+    for (var i = 0; i < COUNT; i++) {
+      var k3 = i * 3;
+      var px = P[k3], py = P[k3 + 1], pz = P[k3 + 2];
+
+      var xz = px * cosA - pz * sinA;
+      var zz = px * sinA + pz * cosA;
+      var yp = py * cosP - zz * sinP - CAM_HEIGHT;
+      var zp = py * sinP + zz * cosP + CAM_DIST;
+      if (zp <= 0.1) continue;
+
+      var fscale = FOCAL / zp;
+      var sx = (halfW + xz * fscale) | 0;
+      var sy = (halfH - yp * fscale) | 0;
+      if (sx < -4 || sx > W + 4 || sy < -4 || sy > H + 4) continue;
+
+      var size = (3.7 - zp * 0.135) * sizeScale;
+      if (size < 1) size = 1;
+      var r = (size + 0.5) | 0;
+      var rn = r * r + r;
+      var col = C[i];
+
+      for (var dy = -r; dy <= r; dy++) {
+        var yy = sy + dy;
+        if (yy < 0 || yy >= H) continue;
+        var row = yy * W;
+        var dy2 = dy * dy;
+        for (var dx = -r; dx <= r; dx++) {
+          if (dx * dx + dy2 > rn) continue;
+          var xx = sx + dx;
+          if (xx < 0 || xx >= W) continue;
+          var idx = row + xx;
+          if (zbuf[idx] > zp) {
+            zbuf[idx] = zp;
+            pixels[idx] = col;
+          }
+        }
+      }
+    }
+
+    ctx.putImageData(frameImg, 0, 0);
+    drawSnow();
+
+    requestAnimationFrame(render);
+  }
+
+  requestAnimationFrame(render);
+
+  // 兜底：极端情况下（后台标签页 rAF 被节流）也保证文字最终可见
+  setTimeout(function () {
+    titleEl.style.opacity = "1";
+    titleEl.style.transform = "none";
+    titleEl.style.filter = "none";
+  }, 3200);
+})();
+</script>
+</body>
+</html>
