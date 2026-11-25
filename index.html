@@ -69,6 +69,31 @@
   @media (prefers-reduced-motion: reduce) {
     .title { filter: none; }
   }
+  /* 手势控制开关：只有一个图标，没有任何文字 */
+  .cam {
+    position: fixed;
+    right: 14px;
+    top: 14px;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.42);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    -webkit-tap-highlight-color: transparent;
+    transition: color .25s ease, background .25s ease, box-shadow .25s ease, opacity .25s ease;
+    z-index: 10;
+  }
+  .cam.show { display: flex; }
+  .cam.on {
+    color: #ffd7ea;
+    background: rgba(255, 176, 212, 0.16);
+    box-shadow: 0 0 18px rgba(255, 160, 205, 0.45);
+  }
 </style>
 </head>
 <body>
@@ -283,7 +308,7 @@
     return c;
   })();
 
-  var FLAKE_N = 10;
+  var FLAKE_N = 14;
   var flakes = [];
   function respawn(f) {
     f.x = Math.random() * W;
@@ -510,6 +535,162 @@
       onMove({ clientX: e.touches[0].clientX, clientY: e.touches[0].clientY, cancelable: true, preventDefault: function () { e.preventDefault(); } });
     }, { passive: false });
     canvas.addEventListener("touchend", function () { onUp({}); }, false);
+  }
+
+  /* ================= 摄像头手势控制（可选、懒加载） ================= */
+  var HANDS_PKG = "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/";
+  var camBtn = null, camVideo = null, camHands = null, camStream = null;
+  var camOn = false, camBusy = false, camTimer = null;
+  var camLastX = null, camLastY = null, camMiss = 0;
+
+  function camSupported() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+    // 微信 / QQ / 微博 内置浏览器拿不到摄像头权限，直接不显示入口
+    if (/micromessenger|mqqbrowser|weibo/i.test(navigator.userAgent)) return false;
+    return true;
+  }
+
+  function camIcon() {
+    return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h4l2 3h4a2 2 0 0 1 2 2z"/>' +
+      '<circle cx="12" cy="13" r="3.6"/></svg>';
+  }
+
+  function camStop() {
+    camOn = false;
+    camBusy = false;
+    if (camTimer) { clearInterval(camTimer); camTimer = null; }
+    if (camStream) {
+      try { camStream.getTracks().forEach(function (t) { t.stop(); }); } catch (err) {}
+      camStream = null;
+    }
+    if (camVideo) {
+      try { camVideo.pause(); camVideo.srcObject = null; } catch (err) {}
+    }
+    camLastX = camLastY = null;
+    if (camBtn) camBtn.classList.remove("on");
+  }
+
+  function onCamResults(results) {
+    var lms = results.multiHandLandmarks;
+    var lm = lms && lms.length ? lms[0] : null;
+    if (!lm) {
+      camMiss++;
+      if (camMiss > 6) { camLastX = camLastY = null; }
+      return;
+    }
+    camMiss = 0;
+    var palm = lm[9];                   // 中指根部 ≈ 掌心
+    var x = 1 - palm.x;                 // 摄像头画面是镜像的，翻回来才跟手
+    var y = palm.y;
+    if (camLastX === null) { camLastX = x; camLastY = y; return; }
+    var dx = x - camLastX, dy = y - camLastY;
+    camLastX = x; camLastY = y;
+    if (Math.abs(dx) < 0.012 && Math.abs(dy) < 0.012) return;   // 抖动死区
+    yaw -= dx * 9.0;                    // 手横移整个画面约转 9 弧度
+    pitch += dy * 5.0;
+    if (pitch < -1.05) pitch = -1.05;
+    if (pitch > 0.85) pitch = 0.85;
+    idle = 0;
+  }
+
+  function camLoop() {
+    if (camTimer) clearInterval(camTimer);
+    camTimer = setInterval(function () {
+      if (!camOn || camBusy || !camHands) return;
+      if (!camVideo || camVideo.readyState < 2) return;
+      camBusy = true;
+      try {
+        camHands.send({ image: camVideo }).then(function () { camBusy = false; },
+                                                 function () { camBusy = false; });
+      } catch (err) { camBusy = false; }
+    }, 95);                              // 约 10 帧/秒识别，给渲染让出性能
+  }
+
+  function loadScript(src) {
+    return new Promise(function (res, rej) {
+      var s = document.createElement("script");
+      s.src = src;
+      s.async = true;
+      s.onload = function () { res(); };
+      s.onerror = function () { rej(new Error("load fail")); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function camStart() {
+    if (camOn) { camStop(); return; }
+    if (camBtn) camBtn.style.opacity = "0.75";
+    var guard = setTimeout(function () {          // 加载/授权卡住时兜底恢复，不留下暗淡的图标
+      if (!camOn) { camStop(); if (camBtn) camBtn.style.opacity = ""; }
+    }, 18000);
+    Promise.resolve()
+      .then(function () {
+        if (!window.Hands) return loadScript(HANDS_PKG + "hands.js");
+      })
+      .then(function () {
+        if (!camHands) {
+          camHands = new window.Hands({ locateFile: function (f) { return HANDS_PKG + f; } });
+          camHands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 0,
+            minDetectionConfidence: 0.55,
+            minTrackingConfidence: 0.5
+          });
+          camHands.onResults(onCamResults);
+        }
+        return navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: "user", width: 320, height: 240, frameRate: 15 }
+        });
+      })
+      .then(function (stream) {
+        camStream = stream;
+        clearTimeout(guard);
+        if (!camVideo) {
+          camVideo = document.createElement("video");
+          camVideo.playsInline = true;
+          camVideo.muted = true;
+          camVideo.autoplay = true;
+          camVideo.setAttribute("playsinline", "");
+          camVideo.style.cssText = "position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;";
+          document.body.appendChild(camVideo);
+        }
+        camVideo.srcObject = stream;
+        var p = camVideo.play();
+        if (p && p.catch) p.catch(function () {});
+        camOn = true;
+        camLastX = camLastY = null;
+        if (camBtn) {
+          camBtn.classList.add("on");
+          camBtn.style.opacity = "";
+        }
+        camLoop();
+      })
+      .catch(function () {              // 拒绝授权 / 加载失败 → 静默退回触摸拖动
+        clearTimeout(guard);
+        camStop();
+        if (camBtn) camBtn.style.opacity = "";
+      });
+  }
+
+  if (camSupported()) {
+    camBtn = document.createElement("button");
+    camBtn.className = "cam";
+    camBtn.type = "button";
+    camBtn.setAttribute("aria-label", "gesture");
+    camBtn.innerHTML = camIcon();
+    camBtn.addEventListener("click", function (e) {
+      e.preventDefault();
+      camStart();
+    }, false);
+    document.body.appendChild(camBtn);
+    camBtn.classList.add("show");
+    // 页面被切走时释放摄像头，别让它一直亮着
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden && camOn) camStop();
+    }, false);
   }
 
   requestAnimationFrame(render);
