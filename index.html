@@ -343,6 +343,10 @@
   }
   window.addEventListener("resize", onResize, false);
   window.addEventListener("orientationchange", onResize, false);
+  // 从后台切回来时重置时间基准，避免一次超大步进
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) lastT = 0;
+  }, false);
 
   /* ================= 主循环 ================= */
   var yaw = 0;                 // 水平旋转角
@@ -365,15 +369,17 @@
   }
 
   function render(now) {
+    requestAnimationFrame(render);   // 先预约下一帧：单帧出错也不会让动画停住
+    try {
     if (!lastT) { lastT = now; startT = now; }
     var dt = (now - lastT) / 1000;
     lastT = now;
     if (dt > 0.05) dt = 0.05;
     if (dt < 0) dt = 0;
-    // 自动缓慢旋转：拖动时停、松手后空闲 2.5 秒再缓慢恢复
+    // 任何时刻都不让画面停住：拖动时也保留慢速自转，松手立刻回到正常速度
     idle += dt;
-    var targetSpin = (dragging || idle < 2.5) ? 0 : 0.27;
-    spin += (targetSpin - spin) * Math.min(1, dt * 3.0);
+    var targetSpin = dragging ? 0.12 : 0.27;
+    spin += (targetSpin - spin) * Math.min(1, dt * 2.2);
     yaw += (spin + (dragging ? 0 : yawVel)) * dt;
     pitch += (dragging ? 0 : pitchVel) * dt;
     var damp = Math.pow(0.94, dt * 60);
@@ -435,8 +441,7 @@
 
     ctx.putImageData(frameImg, 0, 0);
     drawSnow();
-
-    requestAnimationFrame(render);
+    } catch (err) { lastT = 0; }   // 单帧异常兜底，动画不中断
   }
 
   /* ================= 手指 / 鼠标拖动旋转 ================= */
@@ -446,7 +451,7 @@
 
   function onDown(e) {
     dragging = true;
-    idle = 0; spin = 0;
+    idle = 0;
     yawVel = 0; pitchVel = 0;
     lastX = e.clientX; lastY = e.clientY;
     lastMoveT = performance.now();
