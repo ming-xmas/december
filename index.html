@@ -24,6 +24,7 @@
     width: 100%;
     height: 100%;
     background: #000;
+    touch-action: none;      /* 手指拖动旋转，不触发页面滚动 */
   }
   /* 页面上唯一的文字 */
   .title {
@@ -81,10 +82,10 @@
   /* ================= 相机参数（与原作一致） ================= */
   var CAM_DIST = 13.0;
   var CAM_HEIGHT = 6.0;
-  var PITCH = -0.25;
+  var pitch = -0.25;                    // 俯仰角，可上下拖动
   var TREE_HEIGHT = 12.0;
   var TAU = Math.PI * 2;
-  var cosP = Math.cos(PITCH), sinP = Math.sin(PITCH);
+  var cosP = Math.cos(pitch), sinP = Math.sin(pitch);
 
   var TREE_POINTS = 38000;
   var GROUND_POINTS = 3200;
@@ -344,7 +345,11 @@
   window.addEventListener("orientationchange", onResize, false);
 
   /* ================= 主循环 ================= */
-  var angle = 0;
+  var yaw = 0;                 // 水平旋转角
+  var yawVel = 0, pitchVel = 0; // 松手后的惯性
+  var spin = 0.27;             // 当前自动旋转速度
+  var idle = 99;               // 空闲计时
+  var dragging = false;
   var lastT = 0;
   var startT = 0;
   var titleEl = document.querySelector(".title");
@@ -365,7 +370,20 @@
     lastT = now;
     if (dt > 0.05) dt = 0.05;
     if (dt < 0) dt = 0;
-    angle += 0.27 * dt;               // 原速：0.0045 / 帧 @60fps
+    // 自动缓慢旋转：拖动时停、松手后空闲 2.5 秒再缓慢恢复
+    idle += dt;
+    var targetSpin = (dragging || idle < 2.5) ? 0 : 0.27;
+    spin += (targetSpin - spin) * Math.min(1, dt * 3.0);
+    yaw += (spin + (dragging ? 0 : yawVel)) * dt;
+    pitch += (dragging ? 0 : pitchVel) * dt;
+    var damp = Math.pow(0.94, dt * 60);
+    yawVel *= damp;
+    pitchVel *= damp;
+    if (Math.abs(yawVel) < 0.001) yawVel = 0;
+    if (Math.abs(pitchVel) < 0.001) pitchVel = 0;
+    if (pitch < -1.05) { pitch = -1.05; pitchVel = 0; }
+    if (pitch > 0.85) { pitch = 0.85; pitchVel = 0; }
+    cosP = Math.cos(pitch); sinP = Math.sin(pitch);
 
     enterTitle((now - startT) / 1000);
     updateSnow(dt);
@@ -373,7 +391,7 @@
     pixels.fill(0xff000000);
     zbuf.fill(1e9);
 
-    var cosA = Math.cos(angle), sinA = Math.sin(angle);
+    var cosA = Math.cos(yaw), sinA = Math.sin(yaw);
     var halfW = W * 0.5, halfH = H * 0.5;
 
     for (var i = 0; i < COUNT; i++) {
@@ -419,6 +437,74 @@
     drawSnow();
 
     requestAnimationFrame(render);
+  }
+
+  /* ================= 手指 / 鼠标拖动旋转 ================= */
+  var K_YAW = 0.0115;      // 每像素对应的水平旋转角（拖动半个屏幕约转 180°）
+  var K_PITCH = 0.0072;    // 每像素对应的俯仰角
+  var lastX = 0, lastY = 0, lastMoveT = 0;
+
+  function onDown(e) {
+    dragging = true;
+    idle = 0; spin = 0;
+    yawVel = 0; pitchVel = 0;
+    lastX = e.clientX; lastY = e.clientY;
+    lastMoveT = performance.now();
+    if (canvas.setPointerCapture) {
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    }
+    if (e.cancelable) e.preventDefault();
+  }
+
+  function onMove(e) {
+    if (!dragging) return;
+    var dx = e.clientX - lastX, dy = e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+
+    yaw -= dx * K_YAW;                     // 跟手：手指往哪边推，树就往哪边转
+    pitch += dy * K_PITCH;
+    if (pitch < -1.05) pitch = -1.05;
+    if (pitch > 0.85) pitch = 0.85;
+
+    var now = performance.now();
+    var dtm = Math.max(1, now - lastMoveT) / 1000;
+    lastMoveT = now;
+    yawVel = (-dx * K_YAW) / dtm;
+    pitchVel = (dy * K_PITCH) / dtm;
+    if (yawVel > 3.2) yawVel = 3.2;
+    if (yawVel < -3.2) yawVel = -3.2;
+    if (pitchVel > 2.0) pitchVel = 2.0;
+    if (pitchVel < -2.0) pitchVel = -2.0;
+
+    if (e.cancelable) e.preventDefault();
+  }
+
+  function onUp(e) {
+    if (!dragging) return;
+    dragging = false;
+    idle = 0;
+    // 松手前已停住不动 → 不给惯性
+    if (performance.now() - lastMoveT > 120) { yawVel = 0; pitchVel = 0; }
+    if (canvas.releasePointerCapture) {
+      try { canvas.releasePointerCapture(e.pointerId); } catch (err) {}
+    }
+  }
+
+  canvas.addEventListener("pointerdown", onDown, { passive: false });
+  window.addEventListener("pointermove", onMove, { passive: false });
+  window.addEventListener("pointerup", onUp, false);
+  window.addEventListener("pointercancel", onUp, false);
+  // 兜底：老浏览器没有 Pointer Events 时用触摸事件
+  if (!window.PointerEvent) {
+    canvas.addEventListener("touchstart", function (e) {
+      if (e.touches.length !== 1) return;
+      onDown({ clientX: e.touches[0].clientX, clientY: e.touches[0].clientY, pointerId: 1, cancelable: true, preventDefault: function () { e.preventDefault(); } });
+    }, { passive: false });
+    canvas.addEventListener("touchmove", function (e) {
+      if (e.touches.length !== 1) return;
+      onMove({ clientX: e.touches[0].clientX, clientY: e.touches[0].clientY, cancelable: true, preventDefault: function () { e.preventDefault(); } });
+    }, { passive: false });
+    canvas.addEventListener("touchend", function () { onUp({}); }, false);
   }
 
   requestAnimationFrame(render);
