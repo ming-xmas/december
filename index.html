@@ -130,6 +130,9 @@
   /* ================= 相机参数（与原作一致） ================= */
   var CAM_DIST = 13.0;
   var CAM_HEIGHT = 6.0;
+  var camDist = CAM_DIST;               // 实际相机距离：张开手拉近，握拳拉远
+  var camDistT = CAM_DIST;
+  var camOpen = 0.5;                    // 手掌张开程度 0=握拳 1=全张开
   var pitch = -0.25;                    // 俯仰角，可上下拖动
   var TREE_HEIGHT = 12.0;
   var TAU = Math.PI * 2;
@@ -199,6 +202,16 @@
   }
 
   /* ================= 圣诞树 ================= */
+  // 深紫 / 玫瑰红点缀色：约占全部树粒子的 26%
+  function accentColor() {
+    if (Math.random() < 0.46) {                      // 深紫
+      var pv = Math.random();
+      return pack(104 + Math.floor(pv * 54), 30 + Math.floor(pv * 34), 138 + Math.floor(pv * 66));
+    }
+    var rv = Math.random();                          // 玫瑰红
+    return pack(200 + Math.floor(rv * 55), 30 + Math.floor(rv * 32), 82 + Math.floor(rv * 46));
+  }
+
   function genTree() {
     var loops = 9;
     var spiralN = Math.floor(TREE_POINTS * 0.7);
@@ -227,6 +240,8 @@
       g = Math.min(255, g + Math.floor(Math.random() * 36) - 15);
       b = Math.min(255, b + Math.floor(Math.random() * 51) - 15);
 
+      if (Math.random() < 0.26) { add(x, y, z, accentColor()); continue; }   // 深紫 / 玫瑰红点缀
+
       if (Math.random() < 0.08) {
         g = 255 - Math.floor(Math.random() * 36);
         b = 230 + Math.floor(Math.random() * 26);
@@ -250,6 +265,7 @@
 
       g = 165 + Math.floor(Math.random() * 61);
       b = 190 + Math.floor(Math.random() * 61);
+      if (Math.random() < 0.26) { add(x, y, z, accentColor()); continue; }   // 深紫 / 玫瑰红点缀
       add(x, y, z, pack(255, g, b));
     }
   }
@@ -313,6 +329,53 @@
   var P = new Float32Array(posArr);
   var C = new Uint32Array(colArr);
   posArr = null; colArr = null;
+
+  /* ================= 按高度分层：让树身粒子沿外形轮廓一圈圈绕着走 ================= */
+  // 每一层给一个自己的角速度，上下层错开，整棵树表面就像有粒子在绕轮廓流动
+  var BANDS = 22;
+  var BND = new Uint8Array(COUNT);
+  var bandPhase = new Float32Array(BANDS);
+  var bandSpeed = new Float32Array(BANDS);
+  var bandCos = new Float32Array(BANDS), bandSin = new Float32Array(BANDS);
+  for (var bi = 0; bi < BANDS; bi++) {
+    bandSpeed[bi] = 0.18 + bi * 0.035;           // 越往上流得越快
+  }
+  for (var cii = 0; cii < COUNT; cii++) {
+    if (cii >= TREE_POINTS) { BND[cii] = 255; continue; }   // 地面/星空/爱心不参与分层绕转
+    var hy0 = P[cii * 3 + 1];
+    var bd = Math.floor(hy0 / TREE_HEIGHT * BANDS);
+    if (bd < 0) bd = 0;
+    if (bd >= BANDS) bd = BANDS - 1;
+    BND[cii] = bd;
+  }
+
+  /* ================= 绕树外形轮廓转圈的粒子 ================= */
+  // 树在高度 h 处的外轮廓半径（与 genTree 同一套公式）
+  function treeRadius(h) {
+    var baseR = Math.pow(1 - h, 1.1) * 4.3;
+    var wave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+    return baseR * (1.0 + 0.65 * wave);
+  }
+  var ORBIT_N = 320;
+  var OR = new Float32Array(ORBIT_N * 3);   // 实时坐标
+  var OR_H = new Float32Array(ORBIT_N);
+  var OR_TH = new Float32Array(ORBIT_N);
+  var OR_RF = new Float32Array(ORBIT_N);
+  var OR_SP = new Float32Array(ORBIT_N);
+  var OR_C = new Uint32Array(ORBIT_N);
+  var OR_CB = new Uint32Array(ORBIT_N);
+  var OR_CC = new Uint32Array(ORBIT_N);
+  for (var oi = 0; oi < ORBIT_N; oi++) {
+    OR_H[oi] = 0.02 + Math.random() * 0.98;
+    OR_TH[oi] = Math.random() * TAU;
+    OR_RF[oi] = 1.30 + Math.random() * 0.32;        // 贴着轮廓外侧的轨道，转起来才看得清
+    OR_SP[oi] = 0.55 + Math.random() * 0.5;         // 各自不同的角速度，形成疏密层次
+    var oc = Math.random();
+    OR_C[oi] = oc < 0.55 ? pack(255, 255, 255) : (oc < 0.8 ? pack(255, 238, 250) : (oc < 0.9 ? pack(232, 132, 168) : pack(158, 92, 186)));
+    OR_CB[oi] = oc < 0.55 ? pack(238, 200, 224) : (oc < 0.8 ? pack(228, 176, 206) : (oc < 0.9 ? pack(198, 96, 130) : pack(126, 70, 152)));
+    OR_CC[oi] = oc < 0.9 ? pack(150, 110, 140) : pack(96, 52, 118);
+  }
+  var orbitPhase = 0;
 
   /* ================= 前景雪花 ================= */
   var snowSprite = (function () {
@@ -445,6 +508,14 @@
       if (tp > 0.85) tp = 0.85;
       pitch += (tp - pitch) * Math.min(1, dt * 4.0);
     }
+    // 张开手掌 → 相机往里推（一路推进到树内部）；握拳 → 拉远变小
+    if (camPhase === 2 && camHand) {
+      camDistT = 22.0 - camOpen * 18.8;
+    } else if (camPhase === 0) {
+      camDistT = CAM_DIST;
+    }
+    camDist += (camDistT - camDist) * Math.min(1, dt * 3.2);
+    if (camDist < 1.6) camDist = 1.6;
     var damp = Math.pow(0.94, dt * 60);
     yawVel *= damp;
     pitchVel *= damp;
@@ -463,14 +534,30 @@
     var cosA = Math.cos(yaw), sinA = Math.sin(yaw);
     var halfW = W * 0.5, halfH = H * 0.5;
 
+    // 让环绕粒子沿树的外轮廓走
+    orbitPhase += dt;
+    if (orbitPhase > 1e4) orbitPhase = 0;
+
+    // 分层绕转：每层相位自己走，预存 cos/sin，循环里只查表
+    for (var bb = 0; bb < BANDS; bb++) {
+      bandPhase[bb] += dt * bandSpeed[bb];
+      if (bandPhase[bb] > TAU) bandPhase[bb] -= TAU;
+      var ab = yaw + bandPhase[bb];
+      bandCos[bb] = Math.cos(ab);
+      bandSin[bb] = Math.sin(ab);
+    }
+
     for (var i = 0; i < COUNT; i++) {
       var k3 = i * 3;
       var px = P[k3], py = P[k3 + 1], pz = P[k3 + 2];
 
-      var xz = px * cosA - pz * sinA;
-      var zz = px * sinA + pz * cosA;
+      var bnd = BND[i];
+      var ca = cosA, sa = sinA;
+      if (bnd !== 255) { ca = bandCos[bnd]; sa = bandSin[bnd]; }
+      var xz = px * ca - pz * sa;
+      var zz = px * sa + pz * ca;
       var yp = py * cosP - zz * sinP - CAM_HEIGHT;
-      var zp = py * sinP + zz * cosP + CAM_DIST;
+      var zp = py * sinP + zz * cosP + camDist;
       if (zp <= 0.1) continue;
 
       var fscale = FOCAL / zp;
@@ -478,8 +565,11 @@
       var sy = (halfH - yp * fscale) | 0;
       if (sx < -4 || sx > W + 4 || sy < -4 || sy > H + 4) continue;
 
-      var size = (3.7 - zp * 0.135) * sizeScale;
+      var zs = CAM_DIST / camDist;                 // 拉近点变大，拉远变小
+      if (zs > 2.6) zs = 2.6;
+      var size = (3.7 - zp * 0.135) * sizeScale * Math.pow(zs, 0.45);
       if (size < 1) size = 1;
+      if (size > 10 * sizeScale) size = 10 * sizeScale;
       var r = (size + 0.5) | 0;
       var rn = r * r + r;
       var col = C[i];
@@ -497,6 +587,46 @@
           if (zbuf[idx] > zp) {
             zbuf[idx] = zp;
             pixels[idx] = col;
+          }
+        }
+      }
+    }
+
+    // 绕着树外形轮廓转圈的粒子（带一小段尾迹，一眼能看出在转）
+    for (var oj = 0; oj < ORBIT_N; oj++) {
+      var oh = OR_H[oj];
+      var orad = treeRadius(oh) * OR_RF[oj];
+      var oyy0 = TREE_HEIGHT * oh + 0.2;
+      var a0 = OR_TH[oj] + orbitPhase * OR_SP[oj];
+      for (var tr = 0; tr < 4; tr++) {
+        var ta = a0 - tr * 0.062;                     // 尾迹：稍微落在后面
+        var tx = Math.cos(ta) * orad;
+        var tz = Math.sin(ta) * orad;
+        var txz = tx * cosA - tz * sinA;
+        var tzz = tx * sinA + tz * cosA;
+        var typ = oyy0 * cosP - tzz * sinP - CAM_HEIGHT;
+        var tzp = oyy0 * sinP + tzz * cosP + camDist;
+        if (tzp <= 0.1) continue;
+        var tf = FOCAL / tzp;
+        var tsx = (halfW + txz * tf) | 0;
+        var tsy = (halfH - typ * tf) | 0;
+        if (tsx < -6 || tsx > W + 6 || tsy < -6 || tsy > H + 6) continue;
+        var ts = (4.2 - tzp * 0.12) * sizeScale * (1 - tr * 0.2);
+        if (ts < 1) ts = 1;
+        var trr = (ts + 0.5) | 0;
+        var trn = trr * trr + trr;
+        var tc = tr === 0 ? OR_C[oj] : (tr === 1 ? OR_CB[oj] : OR_CC[oj]);
+        for (var tdy = -trr; tdy <= trr; tdy++) {
+          var tyy = tsy + tdy;
+          if (tyy < 0 || tyy >= H) continue;
+          var trow = tyy * W;
+          var tdy2 = tdy * tdy;
+          for (var tdx = -trr; tdx <= trr; tdx++) {
+            if (tdx * tdx + tdy2 > trn) continue;
+            var txx = tsx + tdx;
+            if (txx < 0 || txx >= W) continue;
+            var tidx = trow + txx;
+            if (zbuf[tidx] > tzp) { zbuf[tidx] = tzp; pixels[tidx] = tc; }
           }
         }
       }
@@ -634,6 +764,23 @@
     var ny = palm.y - 0.5;                   // 上下偏移
     camNX = nx;
     camNY = ny;
+
+    // 手掌张开度：指尖到腕部的平均距离 / 掌心尺寸；握拳时小，张开时大
+    var w0 = lm[0];
+    var palmW = Math.sqrt((w0.x - palm.x) * (w0.x - palm.x) + (w0.y - palm.y) * (w0.y - palm.y));
+    if (palmW < 0.004) palmW = 0.004;
+    var tips = [8, 12, 16, 20];
+    var spread = 0;
+    for (var ti = 0; ti < tips.length; ti++) {
+      var q = lm[tips[ti]];
+      spread += Math.sqrt((q.x - w0.x) * (q.x - w0.x) + (q.y - w0.y) * (q.y - w0.y));
+    }
+    spread /= tips.length;
+    var ratio = spread / palmW;
+    var openRaw = (ratio - 1.45) / (2.10 - 1.45);   // 1.45≈握拳 2.10≈完全张开
+    if (openRaw < 0) openRaw = 0;
+    if (openRaw > 1) openRaw = 1;
+    camOpen += (openRaw - camOpen) * 0.35;          // 平滑，避免抖动
     if (camBtn) camBtn.classList.add("hand");
     // 瞬时跟手：手一挥，树立刻跟着走
     if (camLastNX === null) { camLastNX = nx; return; }
@@ -767,6 +914,107 @@
   }
 
   requestAnimationFrame(render);
+
+  /* ================= 背景音乐：整首循环、没有开关 ================= */
+  var audioCtx = null, musicBuf = null, musicOn = false, musicWant = false, musicEl = null;
+  var musicNext = 0, musicTimer = null;
+  var MUSIC_XF = 1.6;                        // 首尾交叉淡化 1.6 秒，衔接听不出断点
+
+  function musicFallback() {                 // 解码失败时退回 <audio loop>（一样没有开关）
+    if (musicOn) return;
+    try {
+      if (!musicEl) {
+        musicEl = new Audio("music.mp3");
+        musicEl.loop = true;
+        musicEl.preload = "auto";
+        musicEl.setAttribute("playsinline", "");
+        musicEl.style.display = "none";
+        document.body.appendChild(musicEl);
+      }
+      var pr = musicEl.play();
+      if (pr && pr.catch) pr.catch(function () {});
+      musicOn = true;
+    } catch (e) {}
+  }
+
+  // 每一段都是「整首 + 开头淡入 + 结尾淡出」，相邻两段重叠 1.6 秒首尾相接
+  function musicSeg(at) {
+    if (!musicBuf || !audioCtx) return;
+    var dur = musicBuf.duration;
+    if (at < audioCtx.currentTime + 0.03) at = audioCtx.currentTime + 0.03;
+    try {
+      var node = audioCtx.createBufferSource();
+      node.buffer = musicBuf;
+      var g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.linearRampToValueAtTime(1, at + MUSIC_XF);
+      g.gain.setValueAtTime(1, at + dur - MUSIC_XF);
+      g.gain.linearRampToValueAtTime(0.0001, at + dur);
+      node.connect(g);
+      g.connect(audioCtx.destination);
+      node.start(at);
+      try { node.stop(at + dur + 0.03); } catch (e) {}
+    } catch (e) { return; }
+    var next = at + dur - MUSIC_XF;
+    musicNext = next;
+    var delay = (next - audioCtx.currentTime - 0.3) * 1000;
+    if (musicTimer) clearTimeout(musicTimer);
+    musicTimer = setTimeout(function () { musicSeg(next); }, Math.max(80, delay));
+  }
+
+  function musicStartNode() {
+    if (musicOn || !musicBuf || !audioCtx) return;
+    try {
+      musicOn = true;
+      musicSeg(audioCtx.currentTime + 0.1);
+    } catch (e) { musicOn = false; musicFallback(); }
+  }
+
+  function musicKick() {
+    if (musicOn || !musicBuf || !audioCtx) return;
+    try {
+      if (audioCtx.state === "suspended") {
+        var r = audioCtx.resume();
+        if (r && r.then) { r.then(musicStartNode, function () {}); return; }
+        return;
+      }
+      musicStartNode();
+    } catch (e) { musicFallback(); }
+  }
+
+  function musicStart() {
+    musicWant = true;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) { musicFallback(); return; }
+    if (!audioCtx) {
+      try { audioCtx = new AC(); } catch (e) { musicFallback(); return; }
+      try { audioCtx.resume(); } catch (e) {}
+      fetch("music.mp3")
+        .then(function (r) { return r.arrayBuffer(); })
+        .then(function (ab) {
+          audioCtx.decodeAudioData(ab, function (buf) {
+            musicBuf = buf;
+            musicKick();
+          }, function () { musicFallback(); });
+        })
+        .catch(function () { musicFallback(); });
+    }
+    musicKick();
+  }
+
+  // 浏览器规定必须有交互才能出声：第一次触摸/点击/按键就自动开始，之后一直循环、无法关闭
+  ["pointerdown", "touchstart", "mousedown", "keydown", "click"].forEach(function (ev) {
+    window.addEventListener(ev, function () { if (!musicOn) musicStart(); }, true);
+  });
+  window.addEventListener("visibilitychange", function () {
+    if (document.hidden || !musicWant) return;
+    musicKick();
+    // 回到前台时如果调度链已经断了，立刻补一段接上
+    if (musicOn && audioCtx && (!musicNext || musicNext - audioCtx.currentTime < 0.15)) {
+      musicSeg(audioCtx.currentTime + 0.1);
+    }
+  });
+  try { musicStart(); } catch (e) {}
 
   // 兜底：极端情况下（后台标签页 rAF 被节流）也保证文字最终可见
   setTimeout(function () {
