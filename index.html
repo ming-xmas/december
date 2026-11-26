@@ -918,7 +918,7 @@
   /* ================= 背景音乐：整首循环、没有开关 ================= */
   var audioCtx = null, musicBuf = null, musicOn = false, musicWant = false, musicEl = null;
   var musicNext = 0, musicTimer = null;
-  var MUSIC_XF = 1.6;                        // 首尾交叉淡化 1.6 秒，衔接听不出断点
+  var MUSIC_XF = 0.8;                        // 首尾交叉淡化 0.8 秒，衔接听不出断点
 
   function musicFallback() {                 // 解码失败时退回 <audio loop>（一样没有开关）
     if (musicOn) return;
